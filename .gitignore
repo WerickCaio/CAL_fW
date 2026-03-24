@@ -3,3 +3,12 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+# Diretórios de build do PlatformIO
+.pio/
+
+# Configurações do editor VS Code
+.vscode/
+
+# Arquivos de sistema operacional (lixo do Windows/Mac)
+.DS_Store
+Thumbs.db
