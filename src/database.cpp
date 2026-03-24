@@ -1,26 +1,23 @@
 #include "database.h"
 #include <EEPROM.h>
 
-// =========================================================================
-// CONSTANTES DA EEPROM (32 Bytes por Slot)
-// =========================================================================
 #define TAG_ID_LENGTH 16    
 #define TAG_NAME_LENGTH 16  
-#define SLOT_SIZE 32        // Tag (16 bytes) + Nome (16 bytes)
+#define SLOT_SIZE 32        
 #define MASTER_SLOT_ADDR 0  
 #define USER_SLOTS_START 1  
-#define MAX_EEPROM_USERS 31 // (1024 - 32) / 32 = 31 vagas na EEPROM
+#define MAX_EEPROM_USERS 31 
 
 // =========================================================================
-// BANCO DE DADOS FIXO (Array Legado)
+// A GRANDE CORREÇÃO DE RAM: Usando const char* em vez de String!
+// Isso economiza centenas de bytes de RAM e impede o travamento.
 // =========================================================================
 struct LegacyUser {
-    String tag;
-    String name;
+    const char* tag;
+    const char* name;
 };
 
-LegacyUser TagsCadastradas[] = {
-    // Professores
+const LegacyUser TagsCadastradas[] = {
     {"c42555d3", "Prof. Lorena"},
     {"3312a53", "Prof. Andre"},
     {"3ae17517", "Prof. Auzuir"},
@@ -29,11 +26,7 @@ LegacyUser TagsCadastradas[] = {
     {"144c67a3", "Prof. Nelio"},
     {"d929e5b9", "Prof. Andre (G)"}, 
     {"f992c5b8", "Prof. Rodrigo"},
-
-    // Colaboradores
     {"16454e99", "Vania"},
-
-    // Bolsistas
     {"9b2d4b9", "Joao Paulo"},
     {"44f75f2da7780", "Werick 2024"},
     {"444492257980", "Gabriel 2024"},
@@ -46,44 +39,61 @@ LegacyUser TagsCadastradas[] = {
     {"439425a387980", "Aquiles"}
 };
 
-// =========================================================================
-// FUNÇÕES INTERNAS PRIVADAS (O main.cpp não vê isso)
-// =========================================================================
-
 String readTagFromAddr(int addr) {
-  char tagChars[TAG_ID_LENGTH];
-  EEPROM.get(addr, tagChars);
-  if (tagChars[0] == (char)0xFF || tagChars[0] == 0x00) return "";
-  tagChars[TAG_ID_LENGTH - 1] = '\0';
-  return String(tagChars);
+  String tag = "";
+  byte firstByte = EEPROM.read(addr);
+  if (firstByte == 0xFF || firstByte == 0x00) return ""; 
+
+  for (int i = 0; i < TAG_ID_LENGTH; i++) {
+    byte b = EEPROM.read(addr + i);
+    if (b == 0xFF || b == 0x00) break; 
+    tag += (char)b;
+  }
+  return tag;
 }
 
 String readNameFromAddr(int addr) {
-  char nameChars[TAG_NAME_LENGTH];
-  EEPROM.get(addr + TAG_ID_LENGTH, nameChars); 
-  if (nameChars[0] == (char)0xFF || nameChars[0] == 0x00) return "Desconhecido";
-  nameChars[TAG_NAME_LENGTH - 1] = '\0';
-  return String(nameChars);
+  String name = "";
+  byte firstByte = EEPROM.read(addr + TAG_ID_LENGTH);
+  if (firstByte == 0xFF || firstByte == 0x00) return "Desconhecido";
+
+  for (int i = 0; i < TAG_NAME_LENGTH; i++) {
+    byte b = EEPROM.read(addr + TAG_ID_LENGTH + i);
+    if (b == 0xFF || b == 0x00) break;
+    name += (char)b;
+  }
+  return name;
 }
 
 void writeUserToAddr(int addr, String tag, String name) {
-  char buffer[SLOT_SIZE];
-  memset(buffer, 0, SLOT_SIZE); // Limpa o buffer com zeros
+  Serial.print(F("[DB-DEBUG] Gravando no endereco: ")); Serial.print(addr);
+  Serial.print(F(" | Tag recebida: '")); Serial.print(tag); Serial.println(F("'"));
   
-  tag.toCharArray(buffer, TAG_ID_LENGTH); 
-  name.toCharArray(buffer + TAG_ID_LENGTH, TAG_NAME_LENGTH); 
+  // TRAVA DE SEGURANÇA: Impede gravar vazio se a RAM falhar!
+  if (tag.length() == 0) {
+    Serial.println(F("[DB-ERRO CRITICO] A Tag chegou vazia! Gravacao abortada."));
+    return;
+  }
+
+  const char* tagCStr = tag.c_str();
+  for (int i = 0; i < TAG_ID_LENGTH; i++) {
+    byte b = (i < tag.length()) ? tagCStr[i] : 0x00;
+    EEPROM.update(addr + i, b);
+  }
   
-  EEPROM.put(addr, buffer);
-  Serial.print(F("[DB] Usuario salvo no endereco: "));
-  Serial.println(addr);
+  const char* nameCStr = name.c_str();
+  for (int i = 0; i < TAG_NAME_LENGTH; i++) {
+    byte b = (i < name.length()) ? nameCStr[i] : 0x00;
+    EEPROM.update(addr + TAG_ID_LENGTH + i, b);
+  }
+
+  byte verificationByte = EEPROM.read(addr);
+  Serial.print(F("[DB-DEBUG] Byte 0 verificado: 0x"));
+  Serial.println(verificationByte, HEX);
 }
 
 void eraseSlot(int addr) {
-  char emptySlot[SLOT_SIZE];
-  memset(emptySlot, 0xFF, SLOT_SIZE);
-  EEPROM.put(addr, emptySlot);
-  Serial.print(F("[DB] Slot apagado no endereco: "));
-  Serial.println(addr);
+  for (int i = 0; i < SLOT_SIZE; i++) EEPROM.update(addr + i, 0xFF);
 }
 
 int findTagInEEPROM(String tag) {
@@ -97,18 +107,22 @@ int findTagInEEPROM(String tag) {
 int findEmptySlot() {
   for (int i = 0; i < MAX_EEPROM_USERS; i++) {
     int addr = (USER_SLOTS_START + i) * SLOT_SIZE;
-    if (EEPROM.read(addr) == 0xFF || EEPROM.read(addr) == 0x00) return addr;
+    byte checkByte = EEPROM.read(addr);
+    
+    Serial.print(F("[DB-DEBUG] Checando vaga no end. ")); Serial.print(addr);
+    Serial.print(F(" | Byte 0 = 0x")); Serial.println(checkByte, HEX);
+
+    // Como corrigimos a gravacao vazia, 0x00 ou 0xFF realmente significa vazio agora!
+    if (checkByte == 0xFF || checkByte == 0x00) {
+      Serial.println(F("[DB-DEBUG] -> VAGA ENCONTRADA!"));
+      return addr;
+    }
   }
+  Serial.println(F("[DB-DEBUG] -> MEMORIA CHEIA!"));
   return -1;
 }
 
-// =========================================================================
-// FUNÇÕES PÚBLICAS (As que o main.cpp usa)
-// =========================================================================
-
-String DB_LoadMaster() { 
-  return readTagFromAddr(MASTER_SLOT_ADDR); 
-}
+String DB_LoadMaster() { return readTagFromAddr(MASTER_SLOT_ADDR); }
 
 void DB_SaveMaster(String tag) { 
   Serial.println(F("[DB] Salvando novo Master..."));
@@ -116,28 +130,21 @@ void DB_SaveMaster(String tag) {
 }
 
 String DB_IdentifyUser(String tag) {
-  // 1. Procura no Array Legado
   int totalLegacy = sizeof(TagsCadastradas) / sizeof(LegacyUser);
   for (int i = 0; i < totalLegacy; i++) {
-    if (tag.equalsIgnoreCase(TagsCadastradas[i].tag)) {
-      return TagsCadastradas[i].name;
+    if (tag.equalsIgnoreCase(String(TagsCadastradas[i].tag))) {
+      return String(TagsCadastradas[i].name);
     }
   }
-
-  // 2. Procura na EEPROM
   int addr = findTagInEEPROM(tag);
-  if (addr != -1) {
-    return readNameFromAddr(addr); // Retorna o nome que gravamos!
-  }
-
-  return ""; // Tag não encontrada
+  if (addr != -1) return readNameFromAddr(addr); 
+  return ""; 
 }
 
 bool DB_AddUser(String tag) {
   int emptyAddr = findEmptySlot();
-  if (emptyAddr == -1) return false; // Memória cheia
+  if (emptyAddr == -1) return false; 
   
-  // Descobre o número do slot para gerar o nome "Visitante XX"
   int slotIndex = (emptyAddr / SLOT_SIZE);
   String defaultName = "Visitante ";
   if (slotIndex < 10) defaultName += "0";
@@ -157,11 +164,7 @@ bool DB_RemoveUser(String tag) {
 bool DB_RenameUser(String tag, String novoNome) {
   int addr = findTagInEEPROM(tag);
   if (addr == -1) return false; 
-  
-  if (novoNome.length() > 15) {
-    novoNome = novoNome.substring(0, 15); // Corta para caber na memória e no LCD
-  }
-  
+  if (novoNome.length() > 15) novoNome = novoNome.substring(0, 15); 
   writeUserToAddr(addr, tag, novoNome);
   return true;
 }
@@ -169,7 +172,6 @@ bool DB_RenameUser(String tag, String novoNome) {
 void DB_DumpToSerial() {
   int usedSlots = 0;
   int freeSlots = 0;
-
   Serial.println(F("\n========================================="));
   Serial.println(F("    DUMP DE USUARIOS (EEPROM)            "));
   Serial.println(F("========================================="));
@@ -180,7 +182,6 @@ void DB_DumpToSerial() {
 
     if (tagInSlot != "") {
       String nameInSlot = readNameFromAddr(addr);
-      
       Serial.print(F("Slot ["));
       if (i + 1 < 10) Serial.print(F("0")); 
       Serial.print(i + 1);

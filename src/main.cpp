@@ -17,7 +17,7 @@
 #include "hal_wdt.h"
 #include "hal_gpio.h"
 #include "hal_rfid.h"
-#include "database.h" 
+#include "database.h"
 
 // --- CONSTANTES DE TEMPO ---
 #define TEMPO_PORTA_ABERTA 1500
@@ -28,7 +28,8 @@
 
 LiquidCrystal lcd(8, 7, 6, 4, 1, 0);
 
-enum SystemState {
+enum SystemState
+{
   STATE_IDLE,
   STATE_DOOR_OPEN,
   STATE_ACCESS_DENIED,
@@ -48,35 +49,114 @@ void setState(SystemState newState);
 void pollBotao();
 bool pollCartao();
 void systemBeep(int quantidade);
-void  migrarBancoDeDadosV2_4(); 
-void setup() {
-  HAL_WDT_Disable();
+
+void restaurarBancoDeDados() {
+  Serial.println(F("\n[SISTEMA] Formatando a EEPROM 100% limpa (Aguarde)..."));
+  for (int i = 0; i < 1024; i++) {
+    EEPROM.update(i, 0xFF); 
+  }
+  Serial.println(F("[SISTEMA] EEPROM Formatada com 0xFF."));
+
+  Serial.println(F("\n[SISTEMA] Gravando TAG MESTRE..."));
+  DB_SaveMaster("cb87aa15");
+
+  const char* backupTags[] = {
+    "b95bd2b9", 
+    "04134f22257980", 
+    "4134f22257980", 
+    "045f2c0a3a7980", 
+    "04444902257980", 
+    "0426515a387980", 
+    "043b3b5a387980", 
+    "0439425a387980"
+  };
+
+  Serial.println(F("\n[SISTEMA] Iniciando injecao das 8 tags..."));
+  for (int i = 0; i < 8; i++) {
+    Serial.print(F("\n--- Adicionando Tag ")); Serial.print(i+1); Serial.println(F(" ---"));
+    DB_AddUser(String(backupTags[i]));
+  }
+
+  Serial.println(F("\n================================================="));
+  Serial.println(F("[SISTEMA] RESTAURACAO CONCLUIDA!"));
+  Serial.println(F("================================================="));
+}
+
+void dumpEEPROMRawHex() {
+  Serial.println(F("\n======================================================================================================="));
+  Serial.println(F("                                RAW EEPROM HEX DUMP (Slots de 32 Bytes)"));
+  Serial.println(F("======================================================================================================="));
+
+  // Lê a EEPROM inteira pulando de 32 em 32 bytes (Exatamente o tamanho do nosso Slot!)
+  for (int addr = 0; addr < 1024; addr += 32) {
+    
+    // 1. Imprime o endereço inicial daquele bloco (ex: [0000], [0032], [0064])
+    char addrStr[10];
+    sprintf(addrStr, "[%04d] ", addr);
+    Serial.print(addrStr);
+
+    // 2. Imprime os 32 bytes em formato Hexadecimal (Ex: 63 62 38 37...)
+    for (int i = 0; i < 32; i++) {
+      byte b = EEPROM.read(addr + i);
+      if (b < 0x10) Serial.print("0"); // Adiciona o zero à esquerda para ficar alinhado
+      Serial.print(b, HEX);
+      Serial.print(" ");
+      
+      // Coloca um separador visual entre a TAG (16 bytes) e o NOME (16 bytes)
+      if (i == 15) Serial.print("- "); 
+    }
+
+    Serial.print(" | ");
+
+    // 3. Imprime os mesmos 32 bytes convertidos para Texto (ASCII)
+    for (int i = 0; i < 32; i++) {
+      byte b = EEPROM.read(addr + i);
+      // Se for um caractere de texto legível (letras, números, espaços)
+      if (b >= 32 && b <= 126) { 
+        Serial.print((char)b);
+      } else {
+        Serial.print("."); // Se for lixo de memória ou nulo (0x00 / 0xFF), imprime um ponto
+      }
+    }
+    Serial.println(); // Pula para a linha do próximo slot
+  }
+  Serial.println(F("=======================================================================================================\n"));
+}
+
+
+void setup()
+{
+  HAL_WDT_Disable(); // Desliga o cão de guarda imediatamente
 
   Serial.begin(115200);
   Serial.println(F("\n\n========================================"));
   Serial.println(F("[BOOT] Controle de Acesso V2.4 - Iniciando"));
   Serial.println(F("========================================"));
 
+  // =================================================================
+  // CHAME A MIGRACAO AQUI (ANTES DE INICIAR SPI, PINOS E LCD)
+  //migracaoCirurgicaEEPROM();
+  // restaurarBancoDeDados();
+
+  // AQUI: Chama o Raio-X da Memória!
+  dumpEEPROMRawHex();
+  // =================================================================
+
   HAL_GPIO_Init();
   HAL_RFID_Init();
   Serial.println(F("[DEBUG] Modulos Inicializados via HAL."));
-
-// ==========================================
-  // RODE A MIGRACAO AQUI
-  migrarBancoDeDadosV2_4(); 
-  // ==========================================
 
   lcd.begin(16, 2);
   lcd.print("Iniciando...");
 
   Serial.println(F("[DEBUG] Lendo Banco de Dados..."));
-  masterTagID = DB_LoadMaster(); 
+  masterTagID = DB_LoadMaster();
   Serial.print(F("[BOOT] Master ID carregado: "));
   Serial.println(masterTagID != "" ? masterTagID : "NENHUM");
 
   delay(500);
-
-  if (HAL_GPIO_ReadButton()) {
+  if (HAL_GPIO_ReadButton())
+  {
     Serial.println(F("[BOOT] Aguardando 5s para Modo Admin..."));
     lcd.clear();
     lcd.print("Modo Admin...");
@@ -84,8 +164,10 @@ void setup() {
     lcd.print("Segure por 5s");
 
     unsigned long bootTime = millis();
-    while (HAL_GPIO_ReadButton()) {
-      if (millis() - bootTime > TEMPO_BOOT_ADMIN) {
+    while (HAL_GPIO_ReadButton())
+    {
+      if (millis() - bootTime > TEMPO_BOOT_ADMIN)
+      {
         Serial.println(F("[BOOT] Entrando no modo SET_MASTER."));
         setState(STATE_SET_MASTER);
         HAL_WDT_Enable();
@@ -99,68 +181,85 @@ void setup() {
   HAL_WDT_Enable();
 }
 
-void loop() {
+void loop()
+{
   HAL_WDT_Feed();
 
   // --- ESCUTA DA PORTA SERIAL ---
-  if (Serial.available() > 0) {
+  if (Serial.available() > 0)
+  {
     String comando = Serial.readStringUntil('\n');
     comando.trim();
 
-    if (comando.equalsIgnoreCase("dumpCards")) {
+    if (comando.equalsIgnoreCase("dumpCards"))
+    {
       Serial.println(F("[COMANDO] Solicitacao de dump recebida."));
       DB_DumpToSerial();
     }
     // NOVO COMANDO: setName [TAG] [NOME]
-    else if (comando.startsWith("setName ")) {
-      String params = comando.substring(8); 
-      int spaceIndex = params.indexOf(' '); 
+    else if (comando.startsWith("setName "))
+    {
+      String params = comando.substring(8);
+      int spaceIndex = params.indexOf(' ');
 
-      if (spaceIndex != -1) {
+      if (spaceIndex != -1)
+      {
         String targetTag = params.substring(0, spaceIndex);
         String novoNome = params.substring(spaceIndex + 1);
 
-        if (DB_RenameUser(targetTag, novoNome)) {
+        if (DB_RenameUser(targetTag, novoNome))
+        {
           Serial.print(F("[OK] Nome atualizado! Nova identidade: "));
           Serial.println(novoNome);
-        } else {
+        }
+        else
+        {
           Serial.println(F("[ERRO] Tag nao encontrada na EEPROM."));
         }
-      } else {
+      }
+      else
+      {
         Serial.println(F("[ERRO] Sintaxe incorreta. Use: setName TAG NOME"));
       }
     }
   }
 
   // --- HEALTH CHECK DO RFID ---
-  if (millis() - lastHealthCheck > TEMPO_HEALTH_CHECK) {
+  if (millis() - lastHealthCheck > TEMPO_HEALTH_CHECK)
+  {
     lastHealthCheck = millis();
     HAL_RFID_HealthCheck();
   }
 
-  switch (currentState) {
+  switch (currentState)
+  {
 
   case STATE_IDLE:
     pollBotao();
 
-    if (pollCartao()) {
+    if (pollCartao())
+    {
       Serial.print(F("[FSM:IDLE] Processando tag: "));
       Serial.println(tagLidaAgora);
 
-      if (tagLidaAgora.equalsIgnoreCase(masterTagID) && masterTagID != "") {
+      if (tagLidaAgora.equalsIgnoreCase(masterTagID) && masterTagID != "")
+      {
         Serial.println(F("[FSM:IDLE] Tag = MESTRE."));
         setState(STATE_ADMIN_MENU);
       }
-      else {
+      else
+      {
         // A MAGICA ACONTECE AQUI: Pergunta ao banco de dados quem é a tag
         String nomeUsuario = DB_IdentifyUser(tagLidaAgora);
 
-        if (nomeUsuario != "") {
+        if (nomeUsuario != "")
+        {
           Serial.print(F("[FSM:IDLE] Acesso Liberado: "));
           Serial.println(nomeUsuario);
           setState(STATE_DOOR_OPEN);
         }
-        else {
+        else
+        {
           Serial.println(F("[FSM:IDLE] Tag = DESCONHECIDA."));
           setState(STATE_ACCESS_DENIED);
         }
@@ -169,23 +268,26 @@ void loop() {
     break;
 
   case STATE_DOOR_OPEN:
-    if (millis() - stateTimer > TEMPO_PORTA_ABERTA) {
+    if (millis() - stateTimer > TEMPO_PORTA_ABERTA)
+    {
       HAL_GPIO_RelayClose();
       setState(STATE_IDLE);
     }
     break;
 
   case STATE_ACCESS_DENIED:
-    if (millis() - stateTimer > TEMPO_ACESSO_NEGADO) {
+    if (millis() - stateTimer > TEMPO_ACESSO_NEGADO)
+    {
       HAL_GPIO_LedDeniedOff();
       setState(STATE_IDLE);
     }
     break;
 
   case STATE_SET_MASTER:
-    if (pollCartao()) {
+    if (pollCartao())
+    {
       masterTagID = tagLidaAgora;
-      DB_SaveMaster(masterTagID); 
+      DB_SaveMaster(masterTagID);
 
       lcd.clear();
       lcd.print("Master Salvo!");
@@ -199,34 +301,42 @@ void loop() {
     break;
 
   case STATE_ADMIN_MENU:
-    if (millis() - stateTimer > TEMPO_ADMIN_TIMEOUT) {
+    if (millis() - stateTimer > TEMPO_ADMIN_TIMEOUT)
+    {
       Serial.println(F("[FSM:ADMIN] Timeout atingido."));
       setState(STATE_IDLE);
       break;
     }
 
-    if (pollCartao()) {
-      if (tagLidaAgora.equalsIgnoreCase(masterTagID)) {
+    if (pollCartao())
+    {
+      if (tagLidaAgora.equalsIgnoreCase(masterTagID))
+      {
         Serial.println(F("[FSM:ADMIN] Mestre apresentado novamente. Saindo..."));
         systemBeep(1);
         setState(STATE_IDLE);
       }
-      else {
+      else
+      {
         String nomeUsuario = DB_IdentifyUser(tagLidaAgora);
 
-        if (nomeUsuario != "") {
+        if (nomeUsuario != "")
+        {
           // A tag já existe! Vamos tentar remover da EEPROM.
           Serial.print(F("[FSM:ADMIN] Tag identificada: "));
           Serial.println(nomeUsuario);
 
-          if (DB_RemoveUser(tagLidaAgora)) {
+          if (DB_RemoveUser(tagLidaAgora))
+          {
             Serial.println(F("[FSM:ADMIN] Acao: REMOVER tag da EEPROM."));
             lcd.clear();
             lcd.print("Tag Removida!");
             systemBeep(1);
             HAL_GPIO_SafeDelay(200);
             systemBeep(1);
-          } else {
+          }
+          else
+          {
             // Se não conseguiu remover da EEPROM, mas ela existe, é LEGADA!
             Serial.println(F("[FSM:ADMIN] Erro: Tentativa de alterar tag legada."));
             lcd.clear();
@@ -234,14 +344,18 @@ void loop() {
             systemBeep(2);
           }
         }
-        else {
+        else
+        {
           // A tag não existe em nenhum lugar. Vamos ADICIONAR.
           Serial.println(F("[FSM:ADMIN] Acao: ADICIONAR nova tag."));
-          if (DB_AddUser(tagLidaAgora)) { 
+          if (DB_AddUser(tagLidaAgora))
+          {
             lcd.clear();
             lcd.print("Tag Adicionada!");
             systemBeep(3);
-          } else {
+          }
+          else
+          {
             lcd.clear();
             lcd.print("Memoria Cheia!");
             systemBeep(5);
@@ -256,9 +370,11 @@ void loop() {
 }
 
 // --- FUNÇÕES AUXILIARES DA FSM ---
-void setState(SystemState newState) {
+void setState(SystemState newState)
+{
   currentState = newState;
-  switch (newState) {
+  switch (newState)
+  {
   case STATE_IDLE:
     lcd.clear();
     lcd.print("Aproxime a Tag");
@@ -295,67 +411,32 @@ void setState(SystemState newState) {
   }
 }
 
-void pollBotao() {
+void pollBotao()
+{
   boolean estadoAtualBT = HAL_GPIO_ReadButton();
-  if (estadoAtualBT == true && ultimoEstadoBT == false) {
+  if (estadoAtualBT == true && ultimoEstadoBT == false)
+  {
     delay(20);
-    if (HAL_GPIO_ReadButton() == true) {
+    if (HAL_GPIO_ReadButton() == true)
+    {
       setState(STATE_DOOR_OPEN);
     }
   }
   ultimoEstadoBT = estadoAtualBT;
 }
 
-bool pollCartao() {
-  if (HAL_RFID_ReadCard(tagLidaAgora)) {
+bool pollCartao()
+{
+  if (HAL_RFID_ReadCard(tagLidaAgora))
+  {
     return true;
   }
   return false;
 }
 
-void systemBeep(int quantidade) {
+void systemBeep(int quantidade)
+{
   HAL_GPIO_Beep(quantidade);
   delay(50);
   HAL_RFID_WakeUp();
-}
-
-void migrarBancoDeDadosV2_4() {
-  Serial.println(F("\n========================================="));
-  Serial.println(F("   [ATENCAO] INICIANDO MIGRACAO DE DADOS "));
-  Serial.println(F("========================================="));
-  
-  // 1. Apaga fisicamente todos os 1024 bytes da EEPROM
-  Serial.println(F("[1/4] Formatando a EEPROM..."));
-  for (int i = 0; i < 1024; i++) {
-    EEPROM.write(i, 0xFF);
-  }
-  
-  // 2. Restaura a Tag Mestre
-  Serial.println(F("[2/4] Restaurando Cartao Mestre..."));
-  DB_SaveMaster("cb87aa15");
-
-  // 3. Lista exata do seu Dump da V2.3
-  String tagsParaRestaurar[8] = {
-    "b95bd2b9", 
-    "04134f22257980", 
-    "4134f22257980", 
-    "045f2c0a3a7980", 
-    "04444902257980", 
-    "0426515a387980", 
-    "043b3b5a387980", 
-    "0439425a387980"
-  };
-
-  // 4. Cadastra todo mundo no novo formato de 32 bytes
-  Serial.println(F("[3/4] Restaurando os 8 usuarios antigos..."));
-  for (int i = 0; i < 8; i++) {
-    if (DB_AddUser(tagsParaRestaurar[i])) {
-      Serial.print(F(" -> Tag "));
-      Serial.print(tagsParaRestaurar[i]);
-      Serial.println(F(" migrada com sucesso."));
-    }
-  }
-
-  Serial.println(F("[4/4] Migracao concluida! Banco alinhado para a V2.4."));
-  Serial.println(F("=========================================\n"));
 }
