@@ -28,6 +28,68 @@
 
 LiquidCrystal lcd(8, 7, 6, 4, 1, 0);
 
+// =========================================================================
+// SISTEMA DE LOGS NA RAM (BUFFER CIRCULAR) - MVP
+// =========================================================================
+#define MAX_LOGS 20 // Guardar os últimos 20 acessos na RAM
+
+struct AccessLog
+{
+  unsigned long timestamp; // Tempo em milissegundos
+  char name[16];           // Nome do utilizador
+};
+
+AccessLog logBuffer[MAX_LOGS];
+int logHead = 0;  // Aponta para a próxima posição livre
+int logCount = 0; // Conta quantos logs já temos
+
+// Função para adicionar um novo registo
+void addLog(String userName)
+{
+  logBuffer[logHead].timestamp = millis();
+
+  // Limpa o espaço e copia o nome com segurança (máx 15 caracteres)
+  memset(logBuffer[logHead].name, 0, 16);
+  strncpy(logBuffer[logHead].name, userName.c_str(), 15);
+
+  // A Mágica do Buffer Circular: se chegar ao fim (20), volta para o 0
+  logHead = (logHead + 1) % MAX_LOGS;
+  if (logCount < MAX_LOGS)
+  {
+    logCount++;
+  }
+}
+
+// Função para imprimir os registos no Monitor Serial
+void printLogs()
+{
+  Serial.println(F("\n========================================="));
+  Serial.println(F("       ULTIMOS ACESSOS (RAM LOGS)        "));
+  Serial.println(F("========================================="));
+
+  if (logCount == 0)
+  {
+    Serial.println(F("Nenhum acesso registado ainda desde o boot."));
+  }
+  else
+  {
+    // Calcula por onde começar a ler para imprimir por ordem cronológica
+    int startIdx = (logCount == MAX_LOGS) ? logHead : 0;
+
+    for (int i = 0; i < logCount; i++)
+    {
+      int idx = (startIdx + i) % MAX_LOGS;
+
+      Serial.print(F("[Tempo: "));
+      Serial.print(logBuffer[idx].timestamp);
+      Serial.print(F(" ms] - Acesso: "));
+      Serial.println(logBuffer[idx].name);
+    }
+  }
+  Serial.println(F("=========================================\n"));
+}
+// =========================================================================
+
 enum SystemState
 {
   STATE_IDLE,
@@ -50,30 +112,34 @@ void pollBotao();
 bool pollCartao();
 void systemBeep(int quantidade);
 
-void restaurarBancoDeDados() {
+void restaurarBancoDeDados()
+{
   Serial.println(F("\n[SISTEMA] Formatando a EEPROM 100% limpa (Aguarde)..."));
-  for (int i = 0; i < 1024; i++) {
-    EEPROM.update(i, 0xFF); 
+  for (int i = 0; i < 1024; i++)
+  {
+    EEPROM.update(i, 0xFF);
   }
   Serial.println(F("[SISTEMA] EEPROM Formatada com 0xFF."));
 
   Serial.println(F("\n[SISTEMA] Gravando TAG MESTRE..."));
   DB_SaveMaster("cb87aa15");
 
-  const char* backupTags[] = {
-    "b95bd2b9", 
-    "04134f22257980", 
-    "4134f22257980", 
-    "045f2c0a3a7980", 
-    "04444902257980", 
-    "0426515a387980", 
-    "043b3b5a387980", 
-    "0439425a387980"
-  };
+  const char *backupTags[] = {
+      "b95bd2b9",
+      "04134f22257980",
+      "4134f22257980",
+      "045f2c0a3a7980",
+      "04444902257980",
+      "0426515a387980",
+      "043b3b5a387980",
+      "0439425a387980"};
 
   Serial.println(F("\n[SISTEMA] Iniciando injecao das 8 tags..."));
-  for (int i = 0; i < 8; i++) {
-    Serial.print(F("\n--- Adicionando Tag ")); Serial.print(i+1); Serial.println(F(" ---"));
+  for (int i = 0; i < 8; i++)
+  {
+    Serial.print(F("\n--- Adicionando Tag "));
+    Serial.print(i + 1);
+    Serial.println(F(" ---"));
     DB_AddUser(String(backupTags[i]));
   }
 
@@ -82,39 +148,48 @@ void restaurarBancoDeDados() {
   Serial.println(F("================================================="));
 }
 
-void dumpEEPROMRawHex() {
+void dumpEEPROMRawHex()
+{
   Serial.println(F("\n======================================================================================================="));
   Serial.println(F("                                RAW EEPROM HEX DUMP (Slots de 32 Bytes)"));
   Serial.println(F("======================================================================================================="));
 
   // Lê a EEPROM inteira pulando de 32 em 32 bytes (Exatamente o tamanho do nosso Slot!)
-  for (int addr = 0; addr < 1024; addr += 32) {
-    
+  for (int addr = 0; addr < 1024; addr += 32)
+  {
+
     // 1. Imprime o endereço inicial daquele bloco (ex: [0000], [0032], [0064])
     char addrStr[10];
     sprintf(addrStr, "[%04d] ", addr);
     Serial.print(addrStr);
 
     // 2. Imprime os 32 bytes em formato Hexadecimal (Ex: 63 62 38 37...)
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 32; i++)
+    {
       byte b = EEPROM.read(addr + i);
-      if (b < 0x10) Serial.print("0"); // Adiciona o zero à esquerda para ficar alinhado
+      if (b < 0x10)
+        Serial.print("0"); // Adiciona o zero à esquerda para ficar alinhado
       Serial.print(b, HEX);
       Serial.print(" ");
-      
+
       // Coloca um separador visual entre a TAG (16 bytes) e o NOME (16 bytes)
-      if (i == 15) Serial.print("- "); 
+      if (i == 15)
+        Serial.print("- ");
     }
 
     Serial.print(" | ");
 
     // 3. Imprime os mesmos 32 bytes convertidos para Texto (ASCII)
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 32; i++)
+    {
       byte b = EEPROM.read(addr + i);
       // Se for um caractere de texto legível (letras, números, espaços)
-      if (b >= 32 && b <= 126) { 
+      if (b >= 32 && b <= 126)
+      {
         Serial.print((char)b);
-      } else {
+      }
+      else
+      {
         Serial.print("."); // Se for lixo de memória ou nulo (0x00 / 0xFF), imprime um ponto
       }
     }
@@ -123,6 +198,20 @@ void dumpEEPROMRawHex() {
   Serial.println(F("=======================================================================================================\n"));
 }
 
+void imprimirMenuAjuda()
+{
+  Serial.println(F("\n==================================================="));
+  Serial.println(F("       TERMINAL DE COMANDOS - ACESSO RFID          "));
+  Serial.println(F("==================================================="));
+  Serial.println(F(" Comandos disponiveis:"));
+  Serial.println(F("   help        - Mostra este menu de ajuda"));
+  Serial.println(F("   dumpCards   - Lista todos os usuarios e vagas"));
+  Serial.println(F("   rawDump     - Raio-X Hexadecimal da EEPROM"));
+  Serial.println(F("   showLogs    - Mostra os ultimos 20 acessos (RAM)"));
+  Serial.println(F("   setMaster   - Entra no modo de gravar Cartao Mestre"));
+  Serial.println(F("   setName X Y - Ex: setName 04134f22257980 Livia"));
+  Serial.println(F("===================================================\n"));
+}
 
 void setup()
 {
@@ -135,11 +224,11 @@ void setup()
 
   // =================================================================
   // CHAME A MIGRACAO AQUI (ANTES DE INICIAR SPI, PINOS E LCD)
-  //migracaoCirurgicaEEPROM();
+  // migracaoCirurgicaEEPROM();
   // restaurarBancoDeDados();
 
   // AQUI: Chama o Raio-X da Memória!
-  dumpEEPROMRawHex();
+  // dumpEEPROMRawHex();
   // =================================================================
 
   HAL_GPIO_Init();
@@ -177,6 +266,10 @@ void setup()
   }
 
   Serial.println(F("[BOOT] Iniciando em modo normal (IDLE)."));
+
+  // Imprime o menu para o usuario saber o que pode digitar
+  imprimirMenuAjuda();
+
   setState(STATE_IDLE);
   HAL_WDT_Enable();
 }
@@ -186,17 +279,45 @@ void loop()
   HAL_WDT_Feed();
 
   // --- ESCUTA DA PORTA SERIAL ---
+
+  // --- ESCUTA DA PORTA SERIAL ---
   if (Serial.available() > 0)
   {
     String comando = Serial.readStringUntil('\n');
     comando.trim();
 
-    if (comando.equalsIgnoreCase("dumpCards"))
+    // 1. Comando de Ajuda
+    if (comando.equalsIgnoreCase("help"))
     {
-      Serial.println(F("[COMANDO] Solicitacao de dump recebida."));
+      imprimirMenuAjuda();
+    }
+    // 2. Dump de Usuários formatado
+    else if (comando.equalsIgnoreCase("dumpCards"))
+    {
+      Serial.println(F("[COMANDO] Solicitacao de dump de usuarios recebida."));
       DB_DumpToSerial();
     }
-    // NOVO COMANDO: setName [TAG] [NOME]
+    // 3. Raio-X Hexadecimal da Memória
+    else if (comando.equalsIgnoreCase("rawDump"))
+    {
+      Serial.println(F("[COMANDO] Solicitacao de RAW DUMP Hexadecimal recebida."));
+      dumpEEPROMRawHex(); // A função que criamos na etapa anterior!
+    }
+    // 4. Exibir Logs da RAM
+    else if (comando.equalsIgnoreCase("showLogs"))
+    {
+      Serial.println(F("[COMANDO] Solicitacao de logs recebida."));
+      printLogs();
+    }
+    // 5. Acionar a gravação do Master via Serial
+    else if (comando.equalsIgnoreCase("setMaster"))
+    {
+      Serial.println(F("[COMANDO] Solicitacao para gravar NOVO MESTRE."));
+      Serial.println(F("[AVISO] Aproxime a nova Tag Mestre do leitor..."));
+      // A MÁGICA DA FSM: Apenas mudamos o estado e o loop faz o resto!
+      setState(STATE_SET_MASTER);
+    }
+    // 6. Configurar Nomes
     else if (comando.startsWith("setName "))
     {
       String params = comando.substring(8);
@@ -221,6 +342,11 @@ void loop()
       {
         Serial.println(F("[ERRO] Sintaxe incorreta. Use: setName TAG NOME"));
       }
+    }
+    // Comando inválido
+    else if (comando.length() > 0)
+    {
+      Serial.println(F("[ERRO] Comando desconhecido. Digite 'help' para ver a lista."));
     }
   }
 
@@ -256,6 +382,10 @@ void loop()
         {
           Serial.print(F("[FSM:IDLE] Acesso Liberado: "));
           Serial.println(nomeUsuario);
+
+          // >>> GRAVA O LOG AQUI <<<
+          addLog(nomeUsuario);
+
           setState(STATE_DOOR_OPEN);
         }
         else
