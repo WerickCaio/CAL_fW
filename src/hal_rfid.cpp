@@ -52,3 +52,14 @@ bool HAL_RFID_ReadCard(String &uidOut) {
 
   return true;
 }
+
+void HAL_RFID_ForceReset() {
+  // 1. Força a liberação do pino Slave Select (Garante que o leitor não trave o barramento)
+  digitalWrite(SS_PIN, HIGH); 
+  
+  // 2. Reinicia o barramento SPI do Arduino
+  SPI.begin(); 
+  
+  // 3. Reinicializa todos os registradores vitais do chip MFRC522
+  leitorRFID.PCD_Init(); 
+}

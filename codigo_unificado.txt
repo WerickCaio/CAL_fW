@@ -1,3 +1,15 @@
+
+
+========================================
+ARQUIVO: src/fsm.cpp
+========================================
+
+
+
+========================================
+ARQUIVO: src/main.cpp
+========================================
+
 #include <Arduino.h>
 
 //*************************************************************************
@@ -25,8 +37,6 @@
 #define TEMPO_BOOT_ADMIN 5000
 #define TEMPO_ADMIN_TIMEOUT 30000
 #define TEMPO_HEALTH_CHECK 3000
-// === ADICIONE ESTA LINHA ===
-#define TEMPO_RESET_PREVENTIVO 300000
 
 LiquidCrystal lcd(8, 7, 6, 4, 1, 0);
 
@@ -104,7 +114,6 @@ enum SystemState
 SystemState currentState = STATE_IDLE;
 unsigned long stateTimer = 0;
 unsigned long lastHealthCheck = 0;
-unsigned long lastPreventiveReset = 0;
 String tagLidaAgora = "";
 String masterTagID = "";
 boolean ultimoEstadoBT = false;
@@ -360,14 +369,6 @@ void loop()
     HAL_RFID_HealthCheck();
   }
 
-  // === ADICIONE ESTE BLOCO (RESET PREVENTIVO A CADA 5 MIN) ===
-  if (millis() - lastPreventiveReset > TEMPO_RESET_PREVENTIVO) 
-  {
-    lastPreventiveReset = millis();
-    Serial.println(F("[SISTEMA] Manutencao Preventiva: Executando Reset do RFID (Heartbeat de 5 min)..."));
-    HAL_RFID_ForceReset();
-  }
-
   switch (currentState)
   {
 
@@ -598,3 +599,483 @@ void systemBeep(int quantidade)
 }
 
 
+
+
+========================================
+ARQUIVO: src/hal_gpio.cpp
+========================================
+
+#include "hal_gpio.h"
+#include "hal_wdt.h" // Precisamos do WDT aqui para o SafeDelay
+
+void HAL_GPIO_Init() {
+  pinMode(PIN_RELE, OUTPUT);
+  pinMode(PIN_LED_NEGADO, OUTPUT);
+  pinMode(PIN_BOTAO_ABRIR, INPUT_PULLUP);
+
+  digitalWrite(PIN_RELE, LOW);
+  digitalWrite(PIN_LED_NEGADO, LOW);
+}
+
+bool HAL_GPIO_ReadButton() {
+  // Retorna true se o botão foi pressionado (LOW por causa do PULLUP)
+  return digitalRead(PIN_BOTAO_ABRIR) == LOW;
+}
+
+void HAL_GPIO_RelayOpen() {
+  digitalWrite(PIN_RELE, HIGH);
+}
+
+void HAL_GPIO_RelayClose() {
+  digitalWrite(PIN_RELE, LOW);
+}
+
+void HAL_GPIO_LedDeniedOn() {
+  digitalWrite(PIN_LED_NEGADO, HIGH);
+}
+
+void HAL_GPIO_LedDeniedOff() {
+  digitalWrite(PIN_LED_NEGADO, LOW);
+}
+
+void HAL_GPIO_SafeDelay(unsigned long ms) {
+  unsigned long start = millis();
+  while (millis() - start < ms) {
+    HAL_WDT_Feed(); // Usa a nossa nova HAL!
+    delay(1);
+  }
+}
+
+void HAL_GPIO_Beep(int count) {
+  for (int i = 0; i < count; i++) {
+    HAL_GPIO_RelayOpen(); // Usa o relé como buzzer
+    HAL_GPIO_SafeDelay(200);
+    HAL_GPIO_RelayClose();
+    if (i < count - 1) {
+      HAL_GPIO_SafeDelay(100);
+    }
+  }
+  // Removemos o PCD_Init() daqui. Essa lógica de reiniciar a antena 
+  // do RFID será feita pela máquina de estados ou pela HAL do RFID depois!
+}
+
+========================================
+ARQUIVO: src/hal_rfid.cpp
+========================================
+
+#include "hal_rfid.h"
+#include <SPI.h>
+#include <MFRC522.h>
+
+// Escondemos os pinos do SPI e do módulo aqui dentro!
+#define SS_PIN 10
+#define RST_PIN 9
+
+// A instância do leitor agora é privada deste arquivo
+MFRC522 leitorRFID(SS_PIN, RST_PIN);
+
+void HAL_RFID_Init() {
+  SPI.begin();
+  leitorRFID.PCD_Init();
+}
+
+void HAL_RFID_WakeUp() {
+  // Reinicia apenas a antena/configuração (ideal para pós-ruído de relé)
+  leitorRFID.PCD_Init(); 
+}
+
+void HAL_RFID_HealthCheck() {
+  byte versao = leitorRFID.PCD_ReadRegister(leitorRFID.VersionReg);
+  
+  if (versao == 0x00 || versao == 0xFF) {
+    Serial.println(F("[ERRO CRITICO] Módulo RFID travou (Falha SPI)! Tentando recuperar..."));
+    SPI.begin(); // As vezes o barramento SPI inteiro cai
+    leitorRFID.PCD_Init();
+    delay(50);
+    Serial.println(F("[DEBUG] Modulo RFID reinicializado."));
+  }
+}
+
+bool HAL_RFID_ReadCard(String &uidOut) {
+  // Verifica se há um novo cartão e se consegue ler o serial dele
+  if (!leitorRFID.PICC_IsNewCardPresent() || !leitorRFID.PICC_ReadCardSerial()) {
+    return false;
+  }
+
+  uidOut = "";
+  // Monta a String com zeros à esquerda para manter o padrão "c42555d3"
+  for (byte i = 0; i < leitorRFID.uid.size; i++) {
+    if (leitorRFID.uid.uidByte[i] < 0x10) {
+      uidOut += "0";
+    }
+    uidOut += String(leitorRFID.uid.uidByte[i], HEX);
+  }
+
+  // Para a comunicação com o cartão atual e limpa a criptografia para liberar o SPI
+  leitorRFID.PICC_HaltA();
+  leitorRFID.PCD_StopCrypto1(); 
+
+  return true;
+}
+
+========================================
+ARQUIVO: src/hal_nvm.cpp
+========================================
+
+
+
+========================================
+ARQUIVO: src/hal_display.cpp
+========================================
+
+
+
+========================================
+ARQUIVO: src/hal_wdt.cpp
+========================================
+
+#include "hal_wdt.h"
+#include <avr/wdt.h> // A biblioteca específica do hardware fica ESCONDIDA aqui!
+#include <Arduino.h>
+
+void HAL_WDT_Disable() {
+  MCUSR = 0; // Limpa as flags de reset (Essencial para AVR)
+  wdt_disable();
+}
+
+void HAL_WDT_Enable() {
+  wdt_enable(WDTO_8S); // Configurado para 8 segundos como no seu código original
+}
+
+void HAL_WDT_Feed() {
+  wdt_reset();
+}
+
+========================================
+ARQUIVO: src/database.cpp
+========================================
+
+#include "database.h"
+#include <EEPROM.h>
+
+#define TAG_ID_LENGTH 16    
+#define TAG_NAME_LENGTH 16  
+#define SLOT_SIZE 32        
+#define MASTER_SLOT_ADDR 0  
+#define USER_SLOTS_START 1  
+#define MAX_EEPROM_USERS 31 
+
+// =========================================================================
+// A GRANDE CORREÇÃO DE RAM: Usando const char* em vez de String!
+// Isso economiza centenas de bytes de RAM e impede o travamento.
+// =========================================================================
+struct LegacyUser {
+    const char* tag;
+    const char* name;
+};
+
+const LegacyUser TagsCadastradas[] = {
+    {"c42555d3", "Prof. Lorena"},
+    {"3312a53", "Prof. Andre"},
+    {"3ae17517", "Prof. Auzuir"},
+    {"79cf30c3", "Prof. Eloy"},
+    {"7a6ca07f", "P. Auzuir"},
+    {"144c67a3", "Prof. Nelio"},
+    {"d929e5b9", "Prof. Andre (G)"}, 
+    {"f992c5b8", "Prof. Rodrigo"},
+    {"16454e99", "Vania"},
+    {"9b2d4b9", "Joao Paulo"},
+    {"44f75f2da7780", "Werick 2024"},
+    {"444492257980", "Gabriel 2024"},
+    {"439476a387980", "Joao Paulo Cart"},
+    {"42ed2257980", "Pedro Henrique"},
+    {"43b3b5a387980", "Marina"},
+    {"471675a387980", "Pedro H. (2)"},   
+    {"45f2ca3a7980", "Gabriel 2025"},
+    {"426515a387980", "Livia"},
+    {"439425a387980", "Aquiles"}
+};
+
+String readTagFromAddr(int addr) {
+  String tag = "";
+  byte firstByte = EEPROM.read(addr);
+  if (firstByte == 0xFF || firstByte == 0x00) return ""; 
+
+  for (int i = 0; i < TAG_ID_LENGTH; i++) {
+    byte b = EEPROM.read(addr + i);
+    if (b == 0xFF || b == 0x00) break; 
+    tag += (char)b;
+  }
+  return tag;
+}
+
+String readNameFromAddr(int addr) {
+  String name = "";
+  byte firstByte = EEPROM.read(addr + TAG_ID_LENGTH);
+  if (firstByte == 0xFF || firstByte == 0x00) return "Desconhecido";
+
+  for (int i = 0; i < TAG_NAME_LENGTH; i++) {
+    byte b = EEPROM.read(addr + TAG_ID_LENGTH + i);
+    if (b == 0xFF || b == 0x00) break;
+    name += (char)b;
+  }
+  return name;
+}
+
+void writeUserToAddr(int addr, String tag, String name) {
+  Serial.print(F("[DB-DEBUG] Gravando no endereco: ")); Serial.print(addr);
+  Serial.print(F(" | Tag recebida: '")); Serial.print(tag); Serial.println(F("'"));
+  
+  // TRAVA DE SEGURANÇA: Impede gravar vazio se a RAM falhar!
+  if (tag.length() == 0) {
+    Serial.println(F("[DB-ERRO CRITICO] A Tag chegou vazia! Gravacao abortada."));
+    return;
+  }
+
+  const char* tagCStr = tag.c_str();
+  for (int i = 0; i < TAG_ID_LENGTH; i++) {
+    byte b = (i < tag.length()) ? tagCStr[i] : 0x00;
+    EEPROM.update(addr + i, b);
+  }
+  
+  const char* nameCStr = name.c_str();
+  for (int i = 0; i < TAG_NAME_LENGTH; i++) {
+    byte b = (i < name.length()) ? nameCStr[i] : 0x00;
+    EEPROM.update(addr + TAG_ID_LENGTH + i, b);
+  }
+
+  byte verificationByte = EEPROM.read(addr);
+  Serial.print(F("[DB-DEBUG] Byte 0 verificado: 0x"));
+  Serial.println(verificationByte, HEX);
+}
+
+void eraseSlot(int addr) {
+  for (int i = 0; i < SLOT_SIZE; i++) EEPROM.update(addr + i, 0xFF);
+}
+
+int findTagInEEPROM(String tag) {
+  for (int i = 0; i < MAX_EEPROM_USERS; i++) {
+    int addr = (USER_SLOTS_START + i) * SLOT_SIZE;
+    if (tag.equalsIgnoreCase(readTagFromAddr(addr))) return addr;
+  }
+  return -1;
+}
+
+int findEmptySlot() {
+  for (int i = 0; i < MAX_EEPROM_USERS; i++) {
+    int addr = (USER_SLOTS_START + i) * SLOT_SIZE;
+    byte checkByte = EEPROM.read(addr);
+    
+    Serial.print(F("[DB-DEBUG] Checando vaga no end. ")); Serial.print(addr);
+    Serial.print(F(" | Byte 0 = 0x")); Serial.println(checkByte, HEX);
+
+    // Como corrigimos a gravacao vazia, 0x00 ou 0xFF realmente significa vazio agora!
+    if (checkByte == 0xFF || checkByte == 0x00) {
+      Serial.println(F("[DB-DEBUG] -> VAGA ENCONTRADA!"));
+      return addr;
+    }
+  }
+  Serial.println(F("[DB-DEBUG] -> MEMORIA CHEIA!"));
+  return -1;
+}
+
+String DB_LoadMaster() { return readTagFromAddr(MASTER_SLOT_ADDR); }
+
+void DB_SaveMaster(String tag) { 
+  Serial.println(F("[DB] Salvando novo Master..."));
+  writeUserToAddr(MASTER_SLOT_ADDR, tag, "MASTER"); 
+}
+
+String DB_IdentifyUser(String tag) {
+  int totalLegacy = sizeof(TagsCadastradas) / sizeof(LegacyUser);
+  for (int i = 0; i < totalLegacy; i++) {
+    if (tag.equalsIgnoreCase(String(TagsCadastradas[i].tag))) {
+      return String(TagsCadastradas[i].name);
+    }
+  }
+  int addr = findTagInEEPROM(tag);
+  if (addr != -1) return readNameFromAddr(addr); 
+  return ""; 
+}
+
+bool DB_AddUser(String tag) {
+  int emptyAddr = findEmptySlot();
+  if (emptyAddr == -1) return false; 
+  
+  int slotIndex = (emptyAddr / SLOT_SIZE);
+  String defaultName = "Visitante ";
+  if (slotIndex < 10) defaultName += "0";
+  defaultName += String(slotIndex);
+
+  writeUserToAddr(emptyAddr, tag, defaultName);
+  return true;
+}
+
+bool DB_RemoveUser(String tag) {
+  int tagAddr = findTagInEEPROM(tag);
+  if (tagAddr == -1) return false; 
+  eraseSlot(tagAddr);
+  return true;
+}
+
+bool DB_RenameUser(String tag, String novoNome) {
+  int addr = findTagInEEPROM(tag);
+  if (addr == -1) return false; 
+  if (novoNome.length() > 15) novoNome = novoNome.substring(0, 15); 
+  writeUserToAddr(addr, tag, novoNome);
+  return true;
+}
+
+void DB_DumpToSerial() {
+  int usedSlots = 0;
+  int freeSlots = 0;
+  Serial.println(F("\n========================================="));
+  Serial.println(F("    DUMP DE USUARIOS (EEPROM)            "));
+  Serial.println(F("========================================="));
+
+  for (int i = 0; i < MAX_EEPROM_USERS; i++) {
+    int addr = (USER_SLOTS_START + i) * SLOT_SIZE;
+    String tagInSlot = readTagFromAddr(addr); 
+
+    if (tagInSlot != "") {
+      String nameInSlot = readNameFromAddr(addr);
+      Serial.print(F("Slot ["));
+      if (i + 1 < 10) Serial.print(F("0")); 
+      Serial.print(i + 1);
+      Serial.print(F("]: "));
+      Serial.print(tagInSlot);
+      Serial.print(F(" | Nome: "));
+      Serial.println(nameInSlot);
+      usedSlots++;
+    } else {
+      freeSlots++;
+    }
+  }
+
+  Serial.println(F("-----------------------------------------"));
+  Serial.print(F("Usuarios Cadastrados : ")); Serial.println(usedSlots);
+  Serial.print(F("Espacos Livres       : ")); Serial.println(freeSlots);
+  Serial.print(F("Capacidade Maxima    : ")); Serial.println(MAX_EEPROM_USERS);
+  Serial.println(F("=========================================\n"));
+}
+
+========================================
+ARQUIVO: include/hal_display.h
+========================================
+
+
+
+========================================
+ARQUIVO: include/hal_nvm.h
+========================================
+
+
+
+========================================
+ARQUIVO: include/database.h
+========================================
+
+#ifndef DATABASE_H
+#define DATABASE_H
+
+#include <Arduino.h>
+
+String DB_LoadMaster();
+void DB_SaveMaster(String tag);
+String DB_IdentifyUser(String tag); 
+bool DB_AddUser(String tag);
+bool DB_RemoveUser(String tag);
+void DB_DumpToSerial();
+
+// A NOSSA NOVA FUNÇÃO PARA O MONITOR SERIAL
+bool DB_RenameUser(String tag, String novoNome); 
+
+#endif
+
+========================================
+ARQUIVO: include/fsm.h
+========================================
+
+
+
+========================================
+ARQUIVO: include/hal_rfid.h
+========================================
+
+#ifndef HAL_RFID_H
+#define HAL_RFID_H
+
+#include <Arduino.h>
+
+// --- PROTÓTIPOS DA CAMADA RFID ---
+void HAL_RFID_Init();
+void HAL_RFID_WakeUp();           // O nosso "remédio" contra o ruído do relé
+void HAL_RFID_HealthCheck();      // Verifica se o barramento SPI travou e recupera
+bool HAL_RFID_ReadCard(String &uidOut); // Lê o cartão e devolve o ID na String passada
+
+#endif
+
+========================================
+ARQUIVO: include/hal_gpio.h
+========================================
+
+#ifndef HAL_GPIO_H
+#define HAL_GPIO_H
+
+#include <Arduino.h>
+
+// --- DEFENIÇÕES DE PINOS ---
+// O main.cpp não precisa mais saber os números dos pinos!
+#define PIN_BOTAO_ABRIR 5
+#define PIN_RELE        3
+#define PIN_LED_NEGADO  2
+
+// --- PROTÓTIPOS ---
+void HAL_GPIO_Init();
+bool HAL_GPIO_ReadButton();
+void HAL_GPIO_RelayOpen();
+void HAL_GPIO_RelayClose();
+void HAL_GPIO_LedDeniedOn();
+void HAL_GPIO_LedDeniedOff();
+void HAL_GPIO_Beep(int count);
+void HAL_GPIO_SafeDelay(unsigned long ms); // Substitui seu safeDelay antigo
+
+#endif
+
+========================================
+ARQUIVO: include/hal_wdt.h
+========================================
+
+#ifndef HAL_WDT_H
+#define HAL_WDT_H
+
+// Protótipos das funções do Watchdog
+void HAL_WDT_Disable();
+void HAL_WDT_Enable();
+void HAL_WDT_Feed();
+
+#endif
+
+========================================
+ARQUIVO: ./platformio.ini
+========================================
+
+; PlatformIO Project Configuration File
+;
+;   Build options: build flags, source filter
+;   Upload options: custom upload port, speed and extra flags
+;   Library options: dependencies, extra library storages
+;   Advanced options: extra scripting
+;
+; Please visit documentation for the other options and examples
+; https://docs.platformio.org/page/projectconf.html
+
+[env:nanoatmega328new]
+platform = atmelavr
+board = nanoatmega328new
+framework = arduino
+
+; Configuração das bibliotecas
+lib_deps =
+    miguelbalboa/MFRC522 @ ^1.4.11
+    arduino-libraries/LiquidCrystal @ ^1.0.7
